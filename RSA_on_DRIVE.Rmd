@@ -1,0 +1,277 @@
+---
+title: "RSA analysis of Project DRIVE data"
+author: "John Bruce"
+date: "11/13/2017"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, eval = FALSE)
+```
+
+This is the code to process the DRIVE raw data to feed it into the RSA algorithm.
+
+Data was obtained from the Mendeley Web site (https://data.mendeley.com/datasets/y3ds55n88r/4). Two data files are used: DriveCountData.RDS and ShrnaGeneMap.RDS
+
+The file DriveCountData has data for three pools, poolA, poolB, and BGPD. The data can be analyzed all together, as well as for each pool separately.
+
+Below is the processing of all data together. Farther down, the separate processing for the three pools is shown.
+
+```{r}
+setwd('/data')
+con <- gzfile('DriveCountData.RDS','rb')
+countdata <- readRDS(con)
+countdata <- subset(countdata, !is.na(PLASMID_COUNT), !is.na(SAMPLE_COUNT) )
+library(edgeR)
+y.all <- DGEList(counts=countdata[,3:4],genes=countdata[,c(1,2,5,6,7)])
+num_samples <- dim(countdata)[1]
+total_plasmid_count <- y.all$samples[1,2]
+avg_plasmid_count <- round(total_plasmid_count / num_samples)
+```
+We impute plasmid count for elements of PLASMID_COUNT column that are NA, with avg_plasmid_count 
+(they were made NA because they had low values)
+```{r}
+countdata[is.na(countdata[,3]),3] <- avg_plasmid_count
+y.all <- DGEList(counts=countdata[,3:4],genes=countdata[,c(1,2,5,6,7)])
+y.all <- calcNormFactors(y.all)
+treat <- factor(substring(colnames(countdata)[3:4],1,5))
+treat <- relevel(treat, ref="PLASM")
+design <- model.matrix(~treat)
+```
+The edgeR negative binomial model is fitted to obtain log fold change (logFC) of counts
+between the sample and the plasmid. This is done for each sample-plasmid pair, to obtain
+a logFC per shRNA per cell line.
+```{r}
+fit <- glmFit(y.all, design, dispersion=0.2, prior.count=12)
+fit2 <- glmLRT(fit)
+head(fit2$table)
+countdata <- cbind(countdata,fit2$table)
+# saved countdata as countdata.rds, quit R session and reopened
+con <- gzfile('/data/count_all.rds')
+countall <- readRDS(con)
+FC <- countall[,c(2,7,8)]
+library(data.table)
+FC2 <- dcast(FC,SEQ ~ CLEANNAME, value.var = 'logFC', fun.aggregate = mean)
+mat <- as.matrix(FC2[,c(2:399)])
+library(limma)
+mat2 <- normalizeQuantiles(mat)
+mat[1:5,1:5]
+mat2[1:5,1:5]
+FC2[,c(2:399)] <- mat2
+
+con <- gzfile('/data/ShrnaGeneMap.RDS','rb')
+genemap <- readRDS(con)
+# some elements of GENESYMBOLS column have multiple gene names separated by commas; 
+# this created a problem later on, when running RSA.R script, so...
+genemap$GENESYMBOLS <- gsub(',', '/', genemap$GENESYMBOLS )
+
+joined <- merge(x=genemap,y=FC2,by="SEQ", all.x=T)
+saveRDS(joined,'/data/qn_all.RDS')
+```
+Split the data into csv tables, one per cell line. The RSA.R script will be run on each of them.
+```{r}
+
+for (i in c(4:401)) {
+  cell <- colnames(joined)[i]
+  tab <-  cbind(joined$GENESYMBOLS, joined$SEQ, cell, joined[,i])
+  colnames(tab) <- c("Gene_ID", "Well_ID", "Cell", "Score")
+  write.table(tab, paste0('/data/RSA/all/',cell,'.csv'), quote=F, eol='\r\n', sep=',', row.names=F)
+}
+
+```
+
+The RSA.R script was run in bash.
+
+```{bash}
+cd /data/lines
+vi job.sh
+```
+This the job.sh file for running RSA.R on each csv file:
+```
+#!/bin/bash
+FILES=/data/lines/*
+for f in *.csv
+do
+ echo "Processing ${f} file..."
+ # take action on each file. $f store current file name
+ R CMD BATCH --vanilla --slave --args --l=-2 --u=0 --i=${f} --o=${f}.out -b /home/cbruce/RSA.R
+done
+```
+in bash:
+```{bash}
+chmod +x job.sh
+job.sh
+# Combine header of one of the output files with the body (no header) of all output files
+(head -1 ymb1.csv.out; tail -n +2 -q *.csv.out ) > all.out
+#awk -F',' '$4 < -1 && $5< -1.3 && $6==1' all.out > all.hit.out
+awk -F',' '$6==1' all.out > all.hit.out
+# 60834714 all.out
+# 21292539 all.hit.out
+
+```
+## RSA analysis on pools
+One of the intermediate files saved earlier is used:
+```{r}
+con <- gzfile('/data/count_all.rds','rb')
+countall <- readRDS(con)
+countdata <-countall[,1:7]
+
+treat <- factor(substring(colnames(countdata)[3:4],1,5))
+treat <- relevel(treat, ref="PLASM")
+design <- model.matrix(~treat)
+design
+
+library(edgeR)
+
+count_poolA <- subset(countdata, POOL=="poolA")
+y.a <- DGEList(counts=count_poolA[,3:4],genes=count_poolA[,c(1,2,5,6,7)])
+fit.a <- glmFit(y.a, design, dispersion=0.2, prior.count=12)
+fit2.a <- glmLRT(fit.a)
+count_poolA <- cbind(count_poolA,fit2.a$table)
+
+count_poolB <- subset(countdata, POOL=="poolB")
+y.b <- DGEList(counts=count_poolB[,3:4],genes=count_poolB[,c(1,2,5,6,7)])
+fit.b <- glmFit(y.b, design, dispersion=0.2, prior.count=12)
+fit2.b <- glmLRT(fit.b)
+count_poolB <- cbind(count_poolB,fit2.b$table)
+
+count_BGPD <- subset(countdata, POOL=="BGPD")
+y.c <- DGEList(counts=count_BGPD[,3:4],genes=count_BGPD[,c(1,2,5,6,7)])
+fit.c <- glmFit(y.c, design, dispersion=0.2, prior.count=12)
+fit2.c <- glmLRT(fit.c)
+count_BGPD <- cbind(count_BGPD,fit2.c$table)
+
+# delete unneeded objects to free up memory
+rm(countall)
+rm(list = c('fit.a','fit.b','fit.c','fit2.a','fit2.b','fit2.c','y.a','y.b','y.c'))
+
+#Restart R, due to memory issues
+con <- gzfile('/data/count_poolA.rds','rb')
+count_poolA <- readRDS(con)
+con <- gzfile('/data/count_poolB.rds','rb')
+count_poolB <- readRDS(con)
+con <- gzfile('/data/count_BGPD.rds','rb')
+count_BGPD <- readRDS(con)
+                    
+FC <- rbind(count_poolA, count_poolB, count_BGPD)
+library(data.table) # much much faster than reshape2 package
+FC1 <- as.data.table(FC)
+rm(list=c('count_poolA', 'count_poolB', 'count_BGPD'))
+FC2 <- dcast(FC1,SEQ+CLEANNAME ~ POOL, value.var = 'logFC', fun.aggregate = mean)
+rm(FC)
+rm(FC1)
+head(FC2)
+```
+Quantile normalize data for poolA, poolB, and BGPD:
+```{r}
+library(limma)
+mat <- as.matrix(FC2[,c(3:5)])
+mat2 <- normalizeQuantiles(mat)
+FC3 <- as.data.frame(FC2)
+rm(FC2)
+FC3[,c(3:5)] <- mat2
+con <- gzfile('/data/ShrnaGeneMap.RDS','rb')
+genemap <- readRDS(con)
+# some elements of GENESYMBOLS column have multiple gene names separated by commas; 
+# this created a problem later on, when running RSA.R script, so...
+genemap$GENESYMBOLS <- gsub(',', '/', genemap$GENESYMBOLS )
+
+joined <- merge(x=FC3,y=genemap,by="SEQ", all.x=T)
+qn_BGPD <- joined[,c(1,2,3,6,7)]
+qn_poolA <- joined[,c(1,2,4,6,7)]
+qn_poolB <- joined[,c(1,2,5,6,7)]
+saveRDS(qn_BGPD,'/data/qn_BGPD.rds')
+saveRDS(qn_poolA,'/data/qn_poolA.rds')
+saveRDS(qn_poolB,'/data/qn_poolB.rds')
+
+poolA <- as.data.table(qn_poolA)
+poolA <- dcast(poolA,GENESYMBOLS+SEQ ~ CLEANNAME, value.var = 'poolA', fun.aggregate = mean)
+poolA <- as.data.frame(poolA)
+
+
+poolB <- as.data.table(qn_poolB)
+poolB <- dcast(poolB,GENESYMBOLS+SEQ ~ CLEANNAME, value.var = 'poolB', fun.aggregate = mean)
+poolB <- as.data.frame(poolB)
+
+poolC <- as.data.table(qn_BGPD)
+poolC <- dcast(poolC,GENESYMBOLS+SEQ ~ CLEANNAME, value.var = 'BGPD', fun.aggregate = mean)
+poolC <- as.data.frame(poolC)
+
+for (i in c(3:400)) {
+ cell <- colnames(poolA)[i]
+ tab <- cbind(poolA$GENESYMBOLS,poolA$SEQ, cell, poolA[,i])
+ colnames(tab) <- c("Gene_ID","Well_ID", "Cell", "Score")
+ write.table(tab, paste0('/data/RSA/poolA/',cell,'.csv'), sep=',', quote=T, eol='\r\n', row.names=F)
+}
+
+for (i in c(3:400)) {
+ cell <- colnames(poolB)[i]
+ tab <- cbind(poolB$GENESYMBOLS,poolB$SEQ, cell, poolB[,i])
+ colnames(tab) <- c("Gene_ID","Well_ID", "Cell", "Score")
+ write.table(tab, paste0('/data/RSA/poolB/',cell,'.csv'), sep=',', quote=T, eol='\r\n', row.names=F)
+}
+
+for (i in c(3:400)) {
+ cell <- colnames(poolC)[i]
+ tab <- cbind(poolC$GENESYMBOLS,poolC$SEQ, cell, poolC[,i])
+ colnames(tab) <- c("Gene_ID","Well_ID", "Cell", "Score")
+ write.table(tab, paste0('/data/RSA/BGPD/',cell,'.csv'), sep=',', quote=T, eol='\r\n', row.names=F)
+}
+                      
+```
+In Bash, create the following job.sh script using vi: 
+```
+#!/bin/bash
+FILES=/data/lines/*
+for f in *.csv
+do
+ echo "Processing ${f} file..."
+ # take action on each file. $f store current file name
+ R CMD BATCH --vanilla --slave --args --l=-2 --u=0 --i=${f} --o=${f}.out -b /home/cbruce/RSA.R
+done
+```
+Run the scripts on the *csv files in each directory:
+```{bash}
+cd data/poolA
+vi job.sh
+chmod +x job.sh
+cp job.sh ../poolB
+cp job.sh ../BGMD
+job.sh
+```
+Then, combine the files into one large file named `poolA.out`, etc. The first line of one of the *.out files is used for the header. Lines 2 to the last line of all files are added to this header line, with the `tail -n +2 q` command.
+```{bash}
+cd ../poolA
+(head -1 yd38.csv.out; tail -n +2 -q *.csv.out ) > poolA.out
+#awk -F',' '$4 < -1 && $5< -1.3 && $6==1' poolA.out > poolA.hit.out
+awk -F',' '$6==1' poolA.out > poolA.hit.out
+# wc -l poolA*out
+#   6943283 poolA.hit.out
+#  20335489 poolA.out
+
+cd ../poolB
+(head -1 yd38.csv.out; tail -n +2 -q *.csv.out ) > poolB.out
+#awk -F',' '$4 < -1 && $5< -1.3 && $6==1' poolB.out > poolB.hit.out
+awk -F',' '$6==1' poolB.out > poolB.hit.out
+# wc -l poolB*out
+#   6973834 poolB.hit.out
+#  20241793 poolB.out
+
+cd ../BGPD
+(head -1 yd38.csv.out; tail -n +2 -q *.csv.out ) > BGPD.out
+#awk -F',' '$4 < -1 && $5< -1.3 && $6==1' BGPD.out > BGPD.hit.out
+awk -F',' '$6==1' BGPD.out > BGPD.hit.out
+# wc -l BGPD*out
+#   8463483 BGPD.hit.out
+#  24194467 BGPD.out
+
+cd ../poolA
+rm *csv*
+cd ../poolB
+rm *csv*
+cd ../BGPD
+rm *csv*
+
+```

@@ -1,0 +1,15 @@
+---
+title: "analysis_metadata"
+author: "John Bruce"
+date: "11/26/2017"
+output: html_document
+---
+
+# RSA Analysis
+Run on: `r date()` by: can.bruce@sciomix.com
+
+## Background
+
+* The raw data from the DRIVE pooled shRNA screen was processed as indicated in the Pre-processing markdown file. Missing data was imputed, counts were normalized by library size using EdgeR. A log2-fold change and an associated p-value was calculated for each gene, shRNA and cell line. The skinny table was converted into a wide table having cell lines as columns and gene-shRNA combinations as rows; this table was saved as file coundata.rds
+* Here countdata table is processed with the RSA algorithm. In R, the data is split into one file per cell line. Then each file was processed with the RSA.R script from the Broad Institute. The output files were then combined into one output file. This file indicates whether a guide RNA is 'hit' for down-regulating a given gene
+

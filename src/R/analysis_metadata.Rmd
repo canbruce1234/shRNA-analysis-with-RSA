@@ -1,0 +1,20 @@
+---
+title: "analysis_metadata"
+author: "John Bruce"
+date: "11/26/2017"
+output: html_document
+---
+
+# Data pre-processing
+Run on: `r date()` by: can.bruce@sciomix.com
+
+## Background
+
+* The raw data from the DRIVE pooled shRNA screen contains read counts for 398 cancer cell lines screened for 7837 genes with an average of 20 shRNAs per gene. 
+* To query and download processed DRIVE data, for individual gene symbols, an interactive tool is available: https://oncologynibr.shinyapps.io/drive/ . DRIVE raw data is available at https://data.mendeley.com/datasets/y3ds55n88r/4 . 
+* The data are provided as a RDS file that can be read in R using the readRDS function. They are formatted as a data.frames. 
+* File DriveCountData.RDS contains a unique identifier of the individual shRNA, its sequence, the plasmid counts, the sample counts, an experiment identifier, the name of the pool and the cell line name. Plasmid counts refers to shRNA abundance in the library input, and sample counts refers to NGS counts of individual shRNAs post drop-out screen. 
+* File ShrnaGeneMap.RDS maps shRNA sequences to gene symbols.  
+* In order to obtain data at the shRNA level, the raw data needs to be re-analyzed as described in the Methods of the manuscript (McDonald et al, 2017;  http://dx.doi.org/10.1016/j.cell.2017.07.005)
+* The data was generated for three pools of shRNA, named poolA, poolB, and BGPD. The three shRNA pools can be combined and processed all together, or separately. Both was done here.
+

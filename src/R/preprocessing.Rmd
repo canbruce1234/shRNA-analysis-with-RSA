@@ -1,0 +1,112 @@
+---
+title: Pre-processing DRIVE data
+output: html_document
+params:
+  count_file: "s3://ps-informatics/bioinformatics/data/Project_DRIVE/.Input/DriveCountData.RDS"
+  genemap_file: "s3://ps-informatics/bioinformatics/data/Project_DRIVE/.Input/ShrnaGeneMap.RDS"
+  source_description: "Novartis project DRIVE pooled shRNA screen"
+  data_source: "data"
+  date: !r format(Sys.Date())
+---
+```{r child='analysis_metadata.Rmd'}
+```
+
++ Use rmarkdown parameters for passing variables into the document
+```{r setup, echo=FALSE, results='hide'}
+source("setup.R")
+proj_dir <- opts_knit$get("proj.dir")
+opts_knit$set(data.dir = file.path(proj_dir, params$data_source))
+data_dir <- opts_knit$get("data.dir")
+src_dir <- opts_knit$get("src.dir")
+count_file <- params$count_file
+genemap_file <- params$genemap_file
+#analysis <- basename(tools::file_path_sans_ext(knitr::current_input()))
+analysis <- "preproc"
+local_count_file <- file.path(data_dir,
+                        basename(count_file))
+local_genemap_file <- file.path(data_dir,
+                        basename(genemap_file))
+# create data directory if it doesn't exist
+output_dir <- file.path(opts_knit$get("data.dir"),
+                        analysis,
+                        params$date)
+ifelse(!dir.exists(output_dir), 
+       dir.create(output_dir,recursive=TRUE), FALSE)
+source(file.path(proj_dir,"src","R","setup.R"))
+Sys.setenv(Count_file = count_file,
+           Genemap_file = genemap_file,
+           Data_Dir = data_dir,
+           Src_Dir = src_dir,
+           Local_Count_File = local_count_file,
+           Local_Genemap_File = local_genemap_file,
+           Analysis = analysis,
+           Proj_Dir = proj_dir,
+           Data_Source = params$data_source,
+           UUID = opts_knit$get("uuid"), 
+           Run_Date = params$date)
+```
+Input data download from AWS
+```{bash download_input_from_s3, echo=FALSE}
+cd $Data_Dir
+echo $Local_Count_File
+# if file exists don't download
+if [ ! -f "$Local_Count_File" ]
+then
+  aws s3 cp --only-show-errors $Count_file .
+  echo 'Saved file here:' $Data_Dir
+else
+  echo 'File exists...'
+fi
+echo $Local_Genemap_File
+# if file exists don't download
+if [ ! -f "$Local_Genemap_File" ]
+then
+  aws s3 cp --only-show-errors $Genemap_file .
+  echo 'Saved file here:' $Data_Dir
+else
+  echo 'File exists...'
+fi
+
+```
+##Read in RSA data
+We impute plasmid count for elements of PLASMID_COUNT column that are NA, with avg_plasmid_count 
+(they were made NA because they had low values)
+```{r impute_data}
+data_dir
+setwd(data_dir)
+con <- gzfile('DriveCountData.RDS','rb')
+countdata <- readRDS(con)
+head(countdata,3)
+countdata2 <- subset(countdata, !is.na(PLASMID_COUNT), !is.na(SAMPLE_COUNT) )
+countdata2 <- DGEList(counts=countdata2[,3:4],genes=countdata2[,c(1,2,5,6,7)])
+num_samples <- dim(countdata2)[1]
+total_plasmid_count <- countdata2$samples[1,2]
+num_samples
+total_plasmid_count
+avg_plasmid_count <- round(total_plasmid_count / num_samples)
+countdata[is.na(countdata[,3]),3] <- avg_plasmid_count
+rm(countdata2)
+```
+Normalize the plasmid and sample counts using the library sizes.
+```{r normalize_plasmid_vs_sample_counts}
+
+countdata2 <- DGEList(counts=countdata[,3:4],genes=countdata[,c(1,2,5,6,7)])
+countdata2 <- calcNormFactors(countdata2)
+
+treat <- factor(substring(colnames(countdata)[3:4],1,5))
+treat <- relevel(treat, ref="PLASM")
+design <- model.matrix(~treat)
+```
+The edgeR negative binomial model is fitted to obtain log fold change (logFC) of counts
+between the sample and the plasmid. This is done for each sample-plasmid pair, to obtain
+a logFC per shRNA per cell line.
+```{r fit_NB_model}
+fit <- glmFit(countdata2, design, dispersion=0.2, prior.count=12)
+fit2 <- glmLRT(fit)
+head(fit2$table)
+countdata <- cbind(countdata,fit2$table)
+head(countdata)
+```
+```{r save_output}
+saveRDS(countdata,file.path(data_dir,'countdata.rds'))
+```

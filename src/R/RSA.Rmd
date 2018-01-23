@@ -1,0 +1,113 @@
+---
+title: "RSA"
+author: "John Bruce"
+date: "11/28/2017"
+output: html_document
+params:
+  count_file: "s3://ps-informatics/bioinformatics/data/Project_DRIVE/.Input/DriveCountData.RDS"
+  genemap_file: "s3://ps-informatics/bioinformatics/data/Project_DRIVE/.Input/ShrnaGeneMap.RDS"
+  source_description: "Novartis project DRIVE pooled shRNA screen"
+  data: "data"
+  date: !r format(Sys.Date())
+---
+```{r setup0, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+Use rmarkdown parameters for passing variables into the document
+```{r set_env, echo=FALSE, results='hide'}
+source("setup.R")
+
+proj_dir <- opts_knit$get("proj.dir")
+opts_knit$set(root.dir = "proj_dir" )
+#opts_knit$set(data.dir = file.path(proj_dir, params$data))
+#opts_knit$set(src.dir = file.path(proj_dir, params$source))
+data_dir <- opts_knit$get("data.dir")
+src_dir <- opts_knit$get("src.dir")
+count_file <- params$count_file
+genemap_file <- params$genemap_file
+#analysis <- basename(tools::file_path_sans_ext(knitr::current_input()))
+#analysis <- "preproc"
+local_count_file <- file.path(data_dir,
+                        basename(count_file))
+local_genemap_file <- file.path(data_dir,
+                        basename(genemap_file))
+# create data directory if it doesn't exist
+#output_dir <- file.path(opts_knit$get("data.dir"),
+#                        analysis,
+#                        params$date)
+#ifelse(!dir.exists(output_dir), 
+#       dir.create(output_dir,recursive=TRUE), FALSE)
+#source(file.path(proj_dir,"src","R","setup.R"))
+Sys.setenv(Count_file = count_file,
+           Genemap_file = genemap_file,
+           Data_Dir = data_dir, 
+           Src_Dir = src_dir,
+           Local_Count_File = local_count_file,
+           Local_Genemap_File = local_genemap_file,
+           UUID = opts_knit$get("uuid"),
+           Proj_Dir = proj_dir)
+```
+```{r read_data}
+con <- gzfile(file.path(data_dir,basename(count_file)),"rb")
+countdata <- readRDS(con)
+con <- gzfile("ShrnaGeneMap.RDS","rb")
+genemap <- readRDS(con)
+close(con)
+```
+Make a 'wide' table using dcast function; join with genemap table
+```{r make_wide_table}
+FC <- countdata[,c(2,7,8)]
+FC2 <- dcast(FC,SEQ ~ CLEANNAME, value.var = 'logFC', fun.aggregate = mean)
+mat <- as.matrix(FC2[,c(2:399)])
+mat2 <- normalizeQuantiles(mat)
+mat[1:5,1:5]
+mat2[1:5,1:5]
+FC2[,c(2:399)] <- mat2
+```
+Process genemap table
+```{r process_genemap}
+head(genemap,3)
+# some elements of GENESYMBOLS column have multiple gene names separated by commas; 
+# this created a problem later on, when running RSA.R script, so...
+genemap$GENESYMBOLS <- gsub(',', '/', genemap$GENESYMBOLS )
+
+joined <- merge(x=FC2,y=genemap,by="SEQ", all.x=T)
+head(joined)
+```
+Split the data into csv tables, one per cell line. The RSA.R script will be run on each of them.
+```{r split_data_into_cell_specific_files}
+system('mkdir -p temp')
+joined[1:5,1:5]
+for (i in c(2:399)) {
+  cell <- colnames(joined)[i]
+  tab <-  cbind(joined$GENESYMBOLS, joined$SEQ, cell, joined[,i])
+  colnames(tab) <- c("Gene_ID", "Well_ID", "Cell", "Score")
+  write.table(tab, paste0('temp/',cell,'.csv'), quote=F, eol='\r\n', sep=',', row.names=F)
+}
+opts_knit$set(root.dir = opts_knit$get("src.dir"))
+```
+Run the RSA.R code (version 1.8) on each of the cell line files. It will be run with the following parameters from a shell script: 
+
+```{r eval=FALSE} 
+R CMD BATCH --vanilla --slave --args --l=-2 --u=0 --i=${f} --o=${f}.out -b ../../src/R/RSA.R
+```
+(The --l=2 means that any log2FC less than -2 is a definite hit, and --u=0 means any log2FC more than 0 is a definite non-hit)
+
+Run the RSA.R script
+```{bash RSA_script}
+./RSA_job.sh
+```
+
+Combine all the cell-specific files into one file
+```{bash tidy_up}
+cd temp
+onefile=$(ls -1 *csv.out | head -1); (head -1 $onefile; tail -n +2 -q *.csv.out ) > all.rsa.out 
+mv all.rsa.out ../
+cd ..
+rm -rf temp
+```
+Here is what the output looks like:
+```{bash all.rsa.out}
+head all.rsa.out
+```
+
